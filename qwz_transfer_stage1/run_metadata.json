@@ -75,7 +75,7 @@
     28,
     32
   ],
-  "spectral_ensemble": "bernoulli",
+  "spectral_ensemble": "fixed_count",
   "spectral_rounding": "round",
   "spectral_seed0": 20260731,
   "transfer_fit_h_window": [
@@ -84,7 +84,6 @@
   ],
   "transfer_seed0": 20260730,
   "widths": [
-    20,
     30,
     40,
     50
