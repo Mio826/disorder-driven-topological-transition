@@ -1,5 +1,5 @@
 {
-  "boundary_label": "left_impurity_boundary",
+  "boundary_label": "right_TAI_boundary",
   "density": 0.03,
   "dos_broadening": 0.035,
   "dos_energy_grid": [
@@ -42,15 +42,15 @@
   ],
   "fermi_energy": 0.0,
   "h_values": [
-    -3.458,
-    -3.456,
-    -3.454,
-    -3.452,
-    -3.45,
-    -3.448,
-    -3.446,
-    -3.444,
-    -3.442
+    -1.22,
+    -1.2025,
+    -1.185,
+    -1.1675,
+    -1.15,
+    -1.1325,
+    -1.115,
+    -1.0975000000000001,
+    -1.08
   ],
   "model_params": {
     "A": 1.5,
@@ -61,7 +61,7 @@
   "n_slices": 100000,
   "n_spectral_realizations": 100,
   "n_transfer_seeds": 4,
-  "project_name": "qwz_transfer_stage1",
+  "project_name": "qwz_transfer_right_boundary_stage1",
   "q_values": [
     0.5,
     1.5,
@@ -77,14 +77,14 @@
     28,
     32
   ],
-  "spectral_ensemble": "fixed_count",
+  "spectral_ensemble": "bernoulli",
   "spectral_rounding": "round",
-  "spectral_seed0": 20260731,
+  "spectral_seed0": 20260741,
   "transfer_fit_h_window": [
-    -3.458,
-    -3.442
+    -1.22,
+    -1.08
   ],
-  "transfer_seed0": 20260730,
+  "transfer_seed0": 20260740,
   "widths": [
     30,
     40,

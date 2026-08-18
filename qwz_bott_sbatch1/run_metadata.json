@@ -1,4 +1,11 @@
 {
+  "L_values": [
+    20,
+    30,
+    40,
+    50
+  ],
+  "bott_seed0": 20260725,
   "boundary_label": "left_impurity_boundary",
   "density": 0.03,
   "dos_broadening": 0.035,
@@ -40,17 +47,16 @@
     0.32251704464669967,
     0.35
   ],
+  "ensemble": "fixed_count",
   "fermi_energy": 0.0,
   "h_values": [
-    -3.458,
     -3.456,
     -3.454,
     -3.452,
     -3.45,
     -3.448,
     -3.446,
-    -3.444,
-    -3.442
+    -3.444
   ],
   "model_params": {
     "A": 1.5,
@@ -58,10 +64,9 @@
     "u": -2.05
   },
   "multifractal_box_size": 1,
-  "n_slices": 100000,
+  "n_bott_realizations": 200,
   "n_spectral_realizations": 100,
-  "n_transfer_seeds": 4,
-  "project_name": "qwz_transfer_stage1",
+  "project_name": "qwz_bott_sbatch1",
   "q_values": [
     0.5,
     1.5,
@@ -69,25 +74,12 @@
     2.5,
     3.0
   ],
-  "qr_interval": 1,
+  "rounding": "round",
   "spectral_L_values": [
-    16,
     20,
-    24,
-    28,
-    32
-  ],
-  "spectral_ensemble": "fixed_count",
-  "spectral_rounding": "round",
-  "spectral_seed0": 20260731,
-  "transfer_fit_h_window": [
-    -3.458,
-    -3.442
-  ],
-  "transfer_seed0": 20260730,
-  "widths": [
     30,
     40,
     50
-  ]
+  ],
+  "spectral_seed0": 20260726
 }
