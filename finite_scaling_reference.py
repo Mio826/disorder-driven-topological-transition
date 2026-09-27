@@ -1,5 +1,5 @@
-"""finite_scaling_optimized.py
-===============================
+"""finite_scaling.py
+=====================
 Finite-size numerical measurements for the impurity-driven QWZ project.
 
 This module is the numerical-measurement layer between ``QWZmodel.py`` and
@@ -50,7 +50,7 @@ transverse direction is periodic ``y``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
 from typing import Iterable, Iterator, Literal, Mapping, Optional, Sequence
@@ -59,7 +59,6 @@ import json
 import math
 import os
 import shutil
-from functools import lru_cache
 
 import numpy as np
 import numpy.typing as npt
@@ -254,202 +253,18 @@ def random_slice_impurity_mask(
 
 
 # =============================================================================
-# Internal cached workspaces
-# =============================================================================
-
-
-@dataclass(frozen=True)
-class _BottWorkspace:
-    """Immutable, size-dependent data reused across Bott realizations."""
-
-    clean_hamiltonian: ArrayC
-    positions: ArrayF
-    phase_x: ArrayC
-    phase_y: ArrayC
-    n_occupied_half: int
-
-
-def _model_cache_key(model: QWZModel) -> tuple[object, ...]:
-    return (
-        int(model.Lx),
-        int(model.Ly),
-        float(model.t),
-        float(model.u),
-        float(model.A),
-        bool(model.pbc_x),
-        bool(model.pbc_y),
-    )
-
-
-@lru_cache(maxsize=12)
-def _cached_bott_workspace(
-    Lx: int,
-    Ly: int,
-    t: float,
-    u: float,
-    A: float,
-    pbc_x: bool,
-    pbc_y: bool,
-) -> _BottWorkspace:
-    model = QWZModel(
-        Lx=Lx,
-        Ly=Ly,
-        t=t,
-        u=u,
-        A=A,
-        pbc=(pbc_x, pbc_y),
-    )
-    clean = np.array(
-        model.clean_hamiltonian(sparse=False),
-        dtype=np.complex128,
-        order="F",
-        copy=True,
-    )
-    positions = np.asarray(model.positions(), dtype=np.float64)
-    phase_x = np.exp(2.0j * np.pi * positions[:, 0] / Lx)
-    phase_y = np.exp(2.0j * np.pi * positions[:, 1] / Ly)
-
-    # Prevent accidental modification of cached data.
-    clean.setflags(write=False)
-    positions.setflags(write=False)
-    phase_x.setflags(write=False)
-    phase_y.setflags(write=False)
-
-    return _BottWorkspace(
-        clean_hamiltonian=clean,
-        positions=positions,
-        phase_x=np.asarray(phase_x, dtype=np.complex128),
-        phase_y=np.asarray(phase_y, dtype=np.complex128),
-        n_occupied_half=model.dim // 2,
-    )
-
-
-def _get_bott_workspace(model: QWZModel) -> _BottWorkspace:
-    return _cached_bott_workspace(*_model_cache_key(model))
-
-
-def _hamiltonian_from_cached_clean(
-    model: QWZModel,
-    workspace: _BottWorkspace,
-    sites: Sequence[Site],
-    h: float,
-) -> ArrayC:
-    """Copy the cached clean matrix and apply diagonal mass impurities in place."""
-    matrix = np.array(
-        workspace.clean_hamiltonian,
-        dtype=np.complex128,
-        order="F",
-        copy=True,
-    )
-    if not sites or float(h) == 0.0:
-        return matrix
-
-    site_indices = np.fromiter(
-        (model.site_index(x, y) for x, y in sites),
-        dtype=np.intp,
-        count=len(sites),
-    )
-    orbital_zero = model.norb * site_indices
-    orbital_one = orbital_zero + 1
-    matrix[orbital_zero, orbital_zero] -= float(h)
-    matrix[orbital_one, orbital_one] += float(h)
-    return matrix
-
-
-def _half_filling_eigensystem(
-    matrix: ArrayC,
-    *,
-    zero_tolerance: float,
-    reject_fermi_degeneracy: bool,
-) -> tuple[ArrayF, ArrayC, dict[str, float]]:
-    """Return occupied states plus the first unoccupied energy at E_F=0.
-
-    The QWZ model has exact class-D particle-hole symmetry and an even Hilbert
-    dimension. Away from an exact zero mode, precisely half the states are
-    occupied. ``subset_by_index`` therefore avoids computing the upper half of
-    the eigenvectors while retaining the two energies that define the gap.
-    """
-    dimension = int(matrix.shape[0])
-    n_occupied = dimension // 2
-    eigenvalues, eigenvectors = la.eigh(
-        matrix,
-        subset_by_index=(0, n_occupied),  # inclusive: N/2 occupied + 1 empty
-        driver="evr",
-        check_finite=False,
-        overwrite_a=True,
-    )
-    eigenvalues = np.asarray(eigenvalues, dtype=float)
-    eigenvectors = np.asarray(eigenvectors, dtype=np.complex128)
-
-    highest = float(eigenvalues[n_occupied - 1])
-    lowest = float(eigenvalues[n_occupied])
-    min_abs = min(abs(highest), abs(lowest))
-    tolerance = abs(float(zero_tolerance))
-    if reject_fermi_degeneracy and min_abs <= tolerance:
-        raise ValueError(
-            "an eigenvalue lies at the Fermi energy within tolerance; "
-            f"minimum |E-E_F|={min_abs:.3e}"
-        )
-
-    gap = {
-        "highest_occupied": highest,
-        "lowest_unoccupied": lowest,
-        "spectral_gap": lowest - highest,
-        "min_abs_energy": min_abs,
-    }
-    return eigenvalues[:n_occupied], eigenvectors[:, :n_occupied], gap
-
-
-def _bott_from_vectors_and_phases(
-    occupied_vectors: ArrayC,
-    phase_x: ArrayC,
-    phase_y: ArrayC,
-    *,
-    polar_unitarize: bool = True,
-    singular_tolerance: float = 1.0e-12,
-) -> dict[str, float | int]:
-    vectors = np.asarray(occupied_vectors, dtype=np.complex128)
-    projected_x = vectors.conj().T @ (phase_x[:, None] * vectors)
-    projected_y = vectors.conj().T @ (phase_y[:, None] * vectors)
-
-    if polar_unitarize:
-        projected_x = _polar_unitary(projected_x, singular_tolerance)
-        projected_y = _polar_unitary(projected_y, singular_tolerance)
-
-    commutator = projected_y @ projected_x @ projected_y.conj().T @ projected_x.conj().T
-    phases = np.angle(la.eigvals(commutator, check_finite=False))
-    bott_float = float(np.sum(phases) / (2.0 * np.pi))
-    bott_integer = int(np.rint(bott_float))
-    return {
-        "bott_float": bott_float,
-        "bott": bott_integer,
-        "abs_bott": abs(bott_integer),
-        "integer_residual": float(abs(bott_float - bott_integer)),
-        "n_occupied": int(vectors.shape[1]),
-    }
-
-
-# =============================================================================
 # Bott-index backend
 # =============================================================================
 
 
 def diagonalize_hermitian(matrix) -> tuple[ArrayF, ArrayC]:
-    """Dense Hermitian eigendecomposition with ascending eigenvalues.
-
-    This public general-purpose helper still returns the complete eigensystem.
-    Bott production calculations use a private half-filling fast path instead.
-    """
+    """Dense Hermitian eigendecomposition with ascending eigenvalues."""
     if hasattr(matrix, "toarray"):
         matrix = matrix.toarray()
     array = np.asarray(matrix, dtype=np.complex128)
     if array.ndim != 2 or array.shape[0] != array.shape[1]:
         raise ValueError(f"matrix must be square; received shape {array.shape}")
-    eigenvalues, eigenvectors = la.eigh(
-        array,
-        check_finite=False,
-        overwrite_a=False,
-    )
+    eigenvalues, eigenvectors = la.eigh(array, check_finite=True, overwrite_a=False)
     return np.asarray(eigenvalues, dtype=float), np.asarray(eigenvectors, dtype=complex)
 
 
@@ -492,7 +307,7 @@ def occupied_subspace(
 
 def _polar_unitary(matrix: ArrayC, singular_tolerance: float = 1.0e-12) -> ArrayC:
     """Nearest unitary from an SVD polar decomposition."""
-    u, singular_values, vh = la.svd(matrix, full_matrices=False, check_finite=False, overwrite_a=True)
+    u, singular_values, vh = la.svd(matrix, full_matrices=False, check_finite=True)
     if singular_values.size == 0 or float(np.min(singular_values)) <= singular_tolerance:
         raise np.linalg.LinAlgError(
             "projected position operator is numerically singular; "
@@ -549,7 +364,7 @@ def bott_index_from_occupied_states(
         @ projected_y.conj().T
         @ projected_x.conj().T
     )
-    phases = np.angle(la.eigvals(commutator, check_finite=False))
+    phases = np.angle(la.eigvals(commutator, check_finite=True))
     bott_float = float(np.sum(phases) / (2.0 * np.pi))
     bott_integer = int(np.rint(bott_float))
     integer_residual = float(abs(bott_float - bott_integer))
@@ -627,49 +442,27 @@ def bott_realization(
     zero_tolerance: float = 1.0e-12,
     reject_fermi_degeneracy: bool = True,
 ) -> dict[str, float | int]:
-    """Compute one finite-system Bott realization.
-
-    The public interface and returned fields match the reference version.  For
-    the project's standard ``E_F=0`` class-D calculation, the implementation
-    reuses a cached clean Hamiltonian and computes only the occupied half of
-    the eigenvectors plus the first empty level.
-    """
+    """Compute one finite-system Bott realization."""
     if not (model.pbc_x and model.pbc_y):
         raise ValueError("Bott calculations require periodic boundaries in both axes")
 
     sites = model.canonicalize_impurities(impurities)
     start = perf_counter()
-    workspace = _get_bott_workspace(model)
-    hamiltonian = _hamiltonian_from_cached_clean(model, workspace, sites, h)
-
-    # Fast, exact half-filling route for the PHS QWZ model.
-    if float(fermi_energy) == 0.0 and reject_fermi_degeneracy:
-        _, occupied_vectors, gap = _half_filling_eigensystem(
-            hamiltonian,
-            zero_tolerance=zero_tolerance,
-            reject_fermi_degeneracy=reject_fermi_degeneracy,
-        )
-        bott = _bott_from_vectors_and_phases(
-            occupied_vectors,
-            workspace.phase_x,
-            workspace.phase_y,
-        )
-    else:
-        # General fallback retains the original arbitrary-Fermi-energy behavior.
-        eigenvalues, eigenvectors = diagonalize_hermitian(hamiltonian)
-        bott = bott_index_from_eigensystem(
-            eigenvalues,
-            eigenvectors,
-            workspace.positions,
-            Lx=model.Lx,
-            Ly=model.Ly,
-            fermi_energy=fermi_energy,
-            zero_tolerance=zero_tolerance,
-            reject_fermi_degeneracy=reject_fermi_degeneracy,
-        )
-        gap = nearest_fermi_gap(eigenvalues, fermi_energy=fermi_energy)
-
+    hamiltonian = model.hamiltonian(impurities=sites, h=h, sparse=False)
+    eigenvalues, eigenvectors = diagonalize_hermitian(hamiltonian)
+    bott = bott_index_from_eigensystem(
+        eigenvalues,
+        eigenvectors,
+        model.positions(),
+        Lx=model.Lx,
+        Ly=model.Ly,
+        fermi_energy=fermi_energy,
+        zero_tolerance=zero_tolerance,
+        reject_fermi_degeneracy=reject_fermi_degeneracy,
+    )
+    gap = nearest_fermi_gap(eigenvalues, fermi_energy=fermi_energy)
     elapsed = perf_counter() - start
+
     return {
         **bott,
         **gap,
@@ -803,13 +596,6 @@ class TransferWorkspace:
     zero_slice: ArrayC
     lower_transfer: ArrayC
     constant_B: ArrayC
-    _clean_slice: Optional[ArrayC] = field(default=None, init=False, repr=False, compare=False)
-    _clean_upper_left: Optional[ArrayC] = field(default=None, init=False, repr=False, compare=False)
-    _impurity_upper_block_unit: Optional[ArrayC] = field(default=None, init=False, repr=False, compare=False)
-    _clean_rhs: Optional[ArrayC] = field(default=None, init=False, repr=False, compare=False)
-    _lu_factor: Optional[ArrayC] = field(default=None, init=False, repr=False, compare=False)
-    _lu_pivots: Optional[npt.NDArray[np.int32]] = field(default=None, init=False, repr=False, compare=False)
-    _transfer_template: Optional[ArrayC] = field(default=None, init=False, repr=False, compare=False)
 
 
 def transfer_model_from_template(template: QWZModel, width: int) -> QWZModel:
@@ -841,14 +627,9 @@ def prepare_transfer_workspace(
     interslice = np.kron(np.eye(width, dtype=np.complex128), model.hopping_x)
     if abs(la.det(model.hopping_x)) <= 1.0e-14:
         raise np.linalg.LinAlgError("QWZ x-hopping block is singular; transfer recursion is undefined")
-    constant_B = -la.solve(
-        interslice,
-        interslice.conj().T,
-        assume_a="gen",
-        check_finite=False,
-    )
+    constant_B = -la.solve(interslice, interslice.conj().T, assume_a="gen")
     lower = np.hstack([identity, zero])
-    workspace = TransferWorkspace(
+    return TransferWorkspace(
         model=model,
         energy=float(energy),
         width=width,
@@ -861,39 +642,6 @@ def prepare_transfer_workspace(
         lower_transfer=lower,
         constant_B=np.asarray(constant_B),
     )
-
-    clean_mask = np.zeros(width, dtype=bool)
-    clean_slice = build_slice_hamiltonian(model, clean_mask, h=0.0)
-    clean_upper_left = la.solve(
-        interslice,
-        float(energy) * identity - clean_slice,
-        assume_a="gen",
-        check_finite=False,
-    )
-    # If H_slice -> H_slice - h sigma_z at transverse site y, then
-    # A -> A + h T_x^{-1} sigma_z in the corresponding 2x2 diagonal block.
-    sigma_z = np.asarray([[1.0, 0.0], [0.0, -1.0]], dtype=np.complex128)
-    impurity_upper_block_unit = la.solve(
-        model.hopping_x,
-        sigma_z,
-        assume_a="gen",
-        check_finite=False,
-    )
-    clean_rhs = np.asarray(float(energy) * identity - clean_slice, dtype=np.complex128)
-    lu_factor, lu_pivots = la.lu_factor(interslice, check_finite=False)
-    transfer_template = np.empty((transfer_dim, transfer_dim), dtype=np.complex128)
-    transfer_template[:slice_dim, :slice_dim] = clean_upper_left
-    transfer_template[:slice_dim, slice_dim:] = constant_B
-    transfer_template[slice_dim:, :] = lower
-
-    object.__setattr__(workspace, "_clean_slice", np.asarray(clean_slice))
-    object.__setattr__(workspace, "_clean_upper_left", np.asarray(clean_upper_left))
-    object.__setattr__(workspace, "_impurity_upper_block_unit", np.asarray(impurity_upper_block_unit))
-    object.__setattr__(workspace, "_clean_rhs", clean_rhs)
-    object.__setattr__(workspace, "_lu_factor", np.asarray(lu_factor))
-    object.__setattr__(workspace, "_lu_pivots", np.asarray(lu_pivots))
-    object.__setattr__(workspace, "_transfer_template", transfer_template)
-    return workspace
 
 
 def build_slice_hamiltonian(
@@ -912,29 +660,16 @@ def build_slice_hamiltonian(
         )
 
     width = model.Ly
-    dimension = model.norb * width
-    matrix = np.zeros((dimension, dimension), dtype=np.complex128)
-    onsite = model.onsite_block
-    hopping_y = model.hopping_y
-    hopping_y_adjoint = hopping_y.conj().T
-
-    # Vectorized diagonal onsite blocks.
-    rows = model.norb * np.arange(width, dtype=np.intp)
-    matrix[rows, rows] = onsite[0, 0]
-    matrix[rows + 1, rows + 1] = onsite[1, 1]
-    if np.any(mask) and float(h) != 0.0:
-        impurity_rows = rows[mask]
-        matrix[impurity_rows, impurity_rows] -= float(h)
-        matrix[impurity_rows + 1, impurity_rows + 1] += float(h)
-
-    # The y-hopping assembly is only performed once per workspace in the hot
-    # transfer path; keeping this public helper explicit preserves readability.
+    matrix = np.zeros((model.norb * width, model.norb * width), dtype=np.complex128)
     for y in range(width):
         current = slice(model.norb * y, model.norb * (y + 1))
+        matrix[current, current] += model.local_onsite_block(h=h, is_impurity=bool(mask[y]))
+
         next_y = (y + 1) % width
         neighbor = slice(model.norb * next_y, model.norb * (next_y + 1))
-        matrix[current, neighbor] += hopping_y
-        matrix[neighbor, current] += hopping_y_adjoint
+        matrix[current, neighbor] += model.hopping_y
+        matrix[neighbor, current] += model.hopping_y.conj().T
+
     return matrix
 
 
@@ -944,51 +679,15 @@ def transfer_matrix_for_slice(
     *,
     h: float,
 ) -> ArrayC:
-    """Return the first-order spatial transfer matrix for one random slice.
-
-    The result is numerically identical to the reference implementation.  A
-    cached clean right-hand side and a cached LU factorization of the constant
-    inter-slice hopping remove repeated slice construction and factorization.
-    """
-    mask = np.asarray(impurity_mask, dtype=bool)
-    if mask.shape != (workspace.width,):
-        raise ValueError(
-            f"impurity_mask must have shape ({workspace.width},); received {mask.shape}"
-        )
-
-    if (
-        workspace._clean_rhs is None
-        or workspace._lu_factor is None
-        or workspace._lu_pivots is None
-        or workspace._transfer_template is None
-    ):
-        # Compatibility fallback for a workspace manually constructed through
-        # the unchanged public dataclass constructor.
-        h_slice = build_slice_hamiltonian(workspace.model, mask, h=h)
-        upper_left = la.solve(
-            workspace.interslice,
-            workspace.energy * workspace.identity_slice - h_slice,
-            assume_a="gen",
-            check_finite=False,
-        )
-        upper = np.hstack([upper_left, workspace.constant_B])
-        return np.vstack([upper, workspace.lower_transfer])
-
-    rhs = np.array(workspace._clean_rhs, copy=True, order="F")
-    if np.any(mask) and float(h) != 0.0:
-        rows = 2 * np.flatnonzero(mask).astype(np.intp)
-        rhs[rows, rows] += float(h)
-        rhs[rows + 1, rows + 1] -= float(h)
-
-    upper_left = la.lu_solve(
-        (workspace._lu_factor, workspace._lu_pivots),
-        rhs,
-        check_finite=False,
-        overwrite_b=True,
+    """Return the first-order spatial transfer matrix for one random slice."""
+    h_slice = build_slice_hamiltonian(workspace.model, impurity_mask, h=h)
+    upper_left = la.solve(
+        workspace.interslice,
+        workspace.energy * workspace.identity_slice - h_slice,
+        assume_a="gen",
     )
-    transfer = np.array(workspace._transfer_template, copy=True)
-    transfer[: workspace.slice_dim, : workspace.slice_dim] = upper_left
-    return transfer
+    upper = np.hstack([upper_left, workspace.constant_B])
+    return np.vstack([upper, workspace.lower_transfer])
 
 
 def transfer_recurrence_residual(
@@ -1033,11 +732,8 @@ def lyapunov_exponents_qr(
 ) -> dict[str, object]:
     """Compute transfer-matrix Lyapunov exponents by stabilized QR iteration.
 
-    The transfer matrices and multiplication order match the reference code.
-    The speedup comes from caching the clean slice right-hand side, caching an
-    LU factorization of the constant inter-slice hopping, and reusing a dense
-    transfer-matrix buffer.  This conservative implementation reproduces the
-    finite-length Lyapunov output to floating-point roundoff.
+    Disorder is Bernoulli independently on every transverse site and every
+    slice.  ``model.Ly`` is the strip width; ``model.Lx`` is not used.
     """
     density = _validate_probability(density, "density")
     n_slices = _validate_positive_integer(n_slices, "n_slices")
@@ -1053,18 +749,7 @@ def lyapunov_exponents_qr(
     qr_count = 0
     start = perf_counter()
 
-    if (
-        workspace._clean_rhs is None
-        or workspace._lu_factor is None
-        or workspace._lu_pivots is None
-        or workspace._transfer_template is None
-    ):
-        raise RuntimeError("optimized transfer workspace was not initialized")
-
-    transfer = np.array(workspace._transfer_template, copy=True)
-    d = workspace.slice_dim
     progress_step = max(1, n_slices // 5)
-
     for beginning in range(0, n_slices, qr_interval):
         block_length = min(qr_interval, n_slices - beginning)
         for _ in range(block_length):
@@ -1073,19 +758,7 @@ def lyapunov_exponents_qr(
                 density=density,
                 rng=generator,
             )
-            rhs = np.array(workspace._clean_rhs, copy=True, order="F")
-            if np.any(mask) and float(h) != 0.0:
-                rows = 2 * np.flatnonzero(mask).astype(np.intp)
-                rhs[rows, rows] += float(h)
-                rhs[rows + 1, rows + 1] -= float(h)
-            upper_left = la.lu_solve(
-                (workspace._lu_factor, workspace._lu_pivots),
-                rhs,
-                check_finite=False,
-                overwrite_b=True,
-            )
-            transfer[:d, :d] = upper_left
-            q_matrix = transfer @ q_matrix
+            q_matrix = transfer_matrix_for_slice(workspace, mask, h=h) @ q_matrix
 
         q_matrix, r_matrix = la.qr(
             q_matrix,
